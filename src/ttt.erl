@@ -13,7 +13,7 @@
 %% ~constructors
 start_server()->
     io:fwrite("Server started~n"),
-    register(game_server, spawn(ttt,server_loop,[[]])).
+    global:register_name(game_server, spawn(ttt,server_loop,[[]])).
 
 new_gamer(Nickname)->
     io:format("~p~n", [{hello, Nickname}]),
@@ -39,10 +39,10 @@ server_loop(Rooms)->
        BOOL = pid_exists(GPid,Rooms),
         if
           BOOL ->
-                io:format("~p~n", [{error, gamer_in_the_room}]),
+                send(GPid,"~p~n",[{error, gamer_in_the_room}]),
                 server_loop(Rooms);
           true ->
-                io:format("~p~n", [{ok, room_created}]),
+                send(GPid,"~p~n",[{room_created}]),
                 server_loop([{spawn(ttt,room_loop,[create_board(),GPid,[{GPid, Nickname, ".x."}]]), [GPid]}|Rooms])
         end;
 
@@ -50,11 +50,10 @@ server_loop(Rooms)->
        BOOL = pid_exists(GPid,Rooms),
             if
                 BOOL ->
-                    io:format("~p~n", [{error, gamer_in_the_room}]),
+                    send(GPid,"~p~n", [{error, gamer_in_the_room}]),
                     server_loop(Rooms);
                 true ->
                     find_game(GPid, Nickname, Rooms),
-                    io:format("~p~n", [{ok}]),
                     server_loop(Rooms)
              end;
 
@@ -79,29 +78,38 @@ server_loop(Rooms)->
         Pid = self(),
         receive
          {connect, GPid, Nickname} ->
-              draw(Pole,keys()),
-              room_loop(Pole,CurrentPid,[{GPid, Nickname, ".o." }|Gamers]);
+              Gs = [{GPid, Nickname, ".o." }|Gamers],
+              Pids = [P||{P,_,_} <- Gs],
+              draw(Pids,Pole,keys()),
+              broadcast(Pids,"turn of ~p~n", [Nickname]),
+              room_loop(Pole,CurrentPid,Gs);
          {leave, GPid, Nickname} ->
               [Nick] = [N||{P,N,_} <- Gamers, P=/=GPid],
-              io:format("~p won, because ~p left the game!~n Room closed!~n", [Nick,Nickname]),
-              game_server ! {close_game, Pid};
+              Pids = [P||{P,_,_} <- Gamers],
+              broadcast(Pids,"~p won, because ~p left the game!~n Room closed!~n", [Nick,Nickname]),
+              global:send(game_server, {close_game, Pid});
          {turn, GPid, Position} ->
                 if
                     GPid == CurrentPid ->
-                         io:format("~p~n", [{error, not_your_turn}]),
+                         send(GPid,"~p~n", [{error, not_your_turn}]),
                          room_loop(Pole,CurrentPid,Gamers);
                     true ->
                           [Value] = [V||{P,_,V} <- Gamers, P==GPid],
-                          Board = turn_execute(Pole,Position,Value),
-                          draw(Board,keys()),
-                          [{_,N1,V1},{_,N2,V2}] = Gamers,
+                          [Nickname] = [N||{P,N,_} <- Gamers, P=/=GPid],
+                          [{P1,N1,V1},{P2,N2,V2}] = Gamers,
+                          Board = turn_execute(GPid,Pole,Position,Value),
+                          draw([P1,P2], Board, keys()),
+                          broadcast([P1,P2],"turn of ~p~n", [Nickname]),
                           V1BOOL = check_win(V1,Board),
                           V2BOOL = check_win(V2,Board),
+                          V3BOOL = no_turns(Board),
                           if
-                             V1BOOL -> io:format("~p won! Room closed!~n", [N1]),
-                                       game_server ! {close_game, Pid};
-                             V2BOOL -> io:format("~p won! Room closed!~n", [N2]),
-                                       game_server ! {close_game, Pid};
+                             V1BOOL -> broadcast([P1,P2],"~p won! Room closed!~n", [N1]),
+                                       global:send(game_server,  {close_game, Pid});
+                             V2BOOL -> broadcast([P1,P2],"~p won! Room closed!~n", [N2]),
+                                       global:send(game_server, {close_game, Pid});
+                             V3BOOL -> broadcast([P1,P2],"Dead heat! Room closed!~n", []),
+                                       global:send(game_server, {close_game, Pid});
                              true ->
                                if
                                  Board == Pole ->
@@ -118,16 +126,19 @@ gamer_loop(Nickname)->
     Pid = self(),
     receive
      {create_game} ->
-             game_server ! {create_game, Pid, Nickname},
+             global:send(game_server, {create_game, Pid, Nickname}),
              gamer_loop(Nickname);
      {find_game} ->
-             game_server ! {find_game, Pid, Nickname},
+             global:send(game_server, {find_game, Pid, Nickname}),
              gamer_loop(Nickname);
      {turn, Position} ->
-             game_server ! {turn, Pid, Position},
+             global:send(game_server, {turn, Pid, Position}),
              gamer_loop(Nickname);
-      {leave} ->
-             game_server ! {leave, Pid, Nickname},
+     {leave} ->
+             global:send(game_server, {leave, Pid, Nickname}),
+             gamer_loop(Nickname);
+     {console,String, List} ->
+             io:format(String,List),
              gamer_loop(Nickname)
     end.
 
@@ -137,17 +148,17 @@ pid_exists(Pid,[{_,[Pid,_]}|_])-> true;
 pid_exists(Pid,[{_,[_,Pid]}|_])-> true;
 pid_exists(Pid,[_|T])-> pid_exists(Pid,T).
 
-find_game(_, _, [])->
-     io:format("~p~n", [{error, free_room_not_found}]);
+find_game(GPid, _, [])->
+     send(GPid,"~p~n", [{error, free_room_not_found}]);
 find_game(GPid, Nickname, [{RPid, Pids}|T]) ->
       case Pids of
-        [H|[]] -> game_server ! {change_pids, RPid, [H,GPid]},
+        [H|[]] -> global:send(game_server, {change_pids, RPid, [H,GPid]}),
                    RPid ! {connect, GPid, Nickname};
         [_|_] -> find_game(GPid,Nickname,T)
       end.
 
-find_game_and_execute_command(_,[],_) ->
-     io:format("~p~n", [{error, running_game_not_found}]);
+find_game_and_execute_command(GPid,[],_) ->
+    send(GPid,"~p~n", [{error, running_game_not_found}]);
 find_game_and_execute_command(GPid,[H|T], Command) ->
       case H of
         {RPid,[GPid,_]} -> RPid ! Command;
@@ -165,13 +176,13 @@ keys() ->
   getValue([]) -> io:format("~p~n", [{error, not_exists}]);
   getValue([{_,V}|_])->V.
 
-turn_execute(Board, Position, Value) ->
+turn_execute(GPid, Board, Position, Value) ->
   BOOL = can_pass_value(Board, Position),
   if
     BOOL ->
        [{Position,Value}|[{K,V}||{K,V} <- Board, K=/=Position]];
     true ->
-       io:format("~p~n", [{error, not_correct_turn}]),
+       send(GPid,"~p~n", [{error, not_correct_turn}]),
        Board
   end.
 
@@ -182,6 +193,9 @@ can_pass_value([_|T],K) -> can_pass_value(T,K).
 find_par(_,[]) -> false;
 find_par({K,V},[{K,V}|_]) -> true;
 find_par(Par,[_|T])-> find_par(Par,T).
+
+no_turns(Board) ->
+  [X||{_,X} <- Board, X == ". ."] == [].
 
 check_win(V,Board)->
   BOOL1 = find_par({11,V},Board) and find_par({12,V},Board) and find_par({13,V},Board),
@@ -194,17 +208,25 @@ check_win(V,Board)->
   BOOL8 = find_par({13,V},Board) and find_par({22,V},Board) and find_par({31,V},Board),
   BOOL1 or BOOL2 or BOOL3 or BOOL4 or BOOL5 or BOOL6 or BOOL7  or BOOL8.
 
-draw(Board, [H|T]) ->
+draw(Pids,Board, [H|T]) ->
   if
     H == s ->
-        io:fwrite("Board:~n"),
-        draw(Board,T);
+        broadcast(Pids,"Board:~n",[]),
+        draw(Pids,Board,T);
     H == r ->
-        io:fwrite("~n"),
-        draw(Board,T);
+        broadcast(Pids,"~n",[]),
+        draw(Pids,Board,T);
     H == e ->
-        io:fwrite("~n");
+        broadcast(Pids,"~n",[]);
     true ->
-        io:format("~p",[get(H,Board)]),
-        draw(Board,T)
+        broadcast(Pids,"~p",[get(H,Board)]),
+        draw(Pids,Board,T)
   end.
+
+  broadcast([],_,_) -> {ok};
+  broadcast([H|T],String,List) ->
+     send(H,String,List),
+     broadcast(T,String, List).
+
+  send(Pid, String, List) ->
+     Pid !  {console, String, List}.
