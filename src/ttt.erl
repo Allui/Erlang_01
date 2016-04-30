@@ -78,16 +78,9 @@ server_loop(Rooms)->
         Pid = self(),
         receive
          {connect, GPid, Nickname} ->
-              Gs = [{GPid, Nickname, ".o." }|Gamers],
-              Pids = [P||{P,_,_} <- Gs],
-              draw(Pids,Pole,keys()),
-              broadcast(Pids,"turn of ~p~n", [Nickname]),
-              room_loop(Pole,CurrentPid,Gs);
+              room_loop(Pole,CurrentPid,room_connect_execute(Pole,Gamers,GPid, Nickname));
          {leave, GPid, Nickname} ->
-              [Nick] = [N||{P,N,_} <- Gamers, P=/=GPid],
-              Pids = [P||{P,_,_} <- Gamers],
-              broadcast(Pids,"~p won, because ~p left the game!~n Room closed!~n", [Nick,Nickname]),
-              global:send(game_server, {close_game, Pid});
+              room_leave_execute(Pid,Gamers, GPid, Nickname);
          {turn, GPid, Position} ->
                 if
                     GPid == CurrentPid ->
@@ -120,6 +113,19 @@ server_loop(Rooms)->
                           end
                 end
     end.
+
+room_connect_execute(Pole,Gamers,GPid, Nickname) ->
+  Gs = [{GPid, Nickname, ".o." }|Gamers],
+  Pids = [P||{P,_,_} <- Gs],
+  draw(Pids,Pole,keys()),
+  broadcast(Pids,"turn of ~p~n", [Nickname]),
+  Gs.
+
+room_leave_execute(Pid, Gamers, GPid, Nickname) ->
+  [Nick] = [N||{P,N,_} <- Gamers, P=/=GPid],
+  Pids = [P||{P,_,_} <- Gamers],
+  broadcast(Pids,"~p won, because ~p left the game!~n Room closed!~n", [Nick,Nickname]),
+  global:send(game_server, {close_game, Pid}).
 
 %%Gamer loop
 gamer_loop(Nickname)->
